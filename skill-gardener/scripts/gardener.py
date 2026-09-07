@@ -23,7 +23,7 @@ CATEGORIES = {
     "image": "image images photo illustration 图片 图像 插画 海报 封面 绘图",
     "video": "video gif animation 视频 动图 剪辑",
     "audio": "audio music transcript transcription 音频 音乐 录音 听记 转录",
-    "writing": "writing blog copywriting article 内容 创作 文案 写作 长文 小红书 博客",
+    "writing": "writing blog copywriting article caption captions xiaohongshu 内容 创作 文案 写作 长文 小红书 博客",
     "coding": "code coding debug test refactor 编程 代码 开发 调试 测试",
     "research": "research search discover 调研 研究 搜索 检索 找人",
     "productivity": "calendar todo task schedule 日程 待办 效率 会议室",
@@ -46,6 +46,29 @@ META_FIELDS = {"name", "description", "source_url", "source_path", "source_ref",
 PREF_FIELDS = {"preferred_categories", "preferred_tags", "preferred_skills", "excluded_skills",
                "platform", "cost", "offline", "difficulty", "language", "style", "unused_days", "review_days"}
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+GENERIC_QUERY_WORDS = {
+    "a", "an", "the", "i", "to", "for", "my", "me", "help", "use", "using", "skill", "skills",
+    "want", "make", "create", "find", "recommend", "tool", "tools", "please", "need", "task",
+}
+GENERIC_CJK_BIGRAMS = {
+    "帮我", "我想", "想要", "需要", "一个", "一下", "可以", "请帮", "给我", "这个", "那个", "这些", "那些",
+    "如何", "怎么", "什么", "哪些", "是否", "能否", "目前", "现在", "相关", "工具", "技能", "功能", "需求",
+    "任务", "用户", "推荐", "适合", "使用", "寻找", "查找", "制作", "处理", "完成", "实现", "帮忙",
+}
+NEGATIVE_SCOPE_MARKERS = (
+    " do not use", " not for", " does not support", " unsupported", " excludes ",
+    "不做", "不包括", "不适用", "不要用于", "不支持", "除外",
+)
+QUERY_ALIASES = {
+    "小红书": {"xiaohongshu"},
+    "图文": {"carousel"},
+    "邮件": {"email", "mail"},
+    "邮箱": {"email", "mail"},
+    "部署": {"deploy", "deployment"},
+    "模型": {"model", "models"},
+    "合同": {"contract"},
+    "演示文稿": {"presentation", "presentations", "slides"},
+}
 
 
 def now():
@@ -191,6 +214,13 @@ def categories(text):
     return [k for k, words in CATEGORIES.items() if any(contains(text, word) for word in words.split())]
 
 
+def positive_scope(text):
+    """Keep capability claims while excluding common negative-scope clauses from retrieval."""
+    folded = " " + text.casefold()
+    cuts = [folded.find(marker) for marker in NEGATIVE_SCOPE_MARKERS if folded.find(marker) >= 0]
+    return text[:max(0, min(cuts) - 1)] if cuts else text
+
+
 def frontmatter(path):
     text = path.read_text(encoding="utf-8-sig")
     found = re.match(r"\A---\s*\n(.*?)\n---\s*(?:\n|$)", text, re.S)
@@ -222,7 +252,7 @@ def frontmatter(path):
         meta[key] = value
     if not meta.get("name") or not meta.get("description"):
         raise ValueError("Missing name or description")
-    meta["categories"] = categories(meta["name"] + " " + meta["description"])
+    meta["categories"] = categories(meta["name"] + " " + positive_scope(meta["description"]))
     meta["content_hash"] = hashlib.sha256(text.encode()).hexdigest()
     return meta
 
@@ -299,10 +329,15 @@ def platform_status(item, platform):
 
 def tokens(query):
     words = set(re.findall(r"[a-z0-9][a-z0-9._-]*", query.casefold()))
-    words -= {"a", "an", "the", "i", "to", "for", "my", "me", "help", "use", "skill", "skills", "want", "make"}
+    words -= GENERIC_QUERY_WORDS
     for chunk in re.findall(r"[\u4e00-\u9fff]+", query):
         words.update(chunk[i:i + 2] for i in range(len(chunk) - 1))
-    return words - {"帮我", "我想", "想要", "需要", "一个", "一下", "可以", "推荐", "适合", "使用", "技能"}
+    return words - GENERIC_CJK_BIGRAMS
+
+
+def query_aliases(query):
+    folded = query.casefold()
+    return {alias for cue, aliases in QUERY_ALIASES.items() if cue in folded for alias in aliases}
 
 
 def recommend(lib, args):
@@ -311,6 +346,7 @@ def recommend(lib, args):
     if not query:
         raise ValueError("A nonempty task is required")
     qtokens = tokens(query)
+    qaliases = query_aliases(query)
     qcats = set(categories(query))
     if not re.search(r"(创建|安装|管理|编写|制作|整理|create|install|manage|write)\s*(一个|个|a|an|my)?\s*(skill|技能|plugin|插件)", query):
         qcats.discard("skill-management")
@@ -350,19 +386,33 @@ def recommend(lib, args):
             rejected = True
         if rejected:
             continue
-        haystack = " ".join([name, item["description"]] + item["tags"] + item["outputs"]).casefold()
+        haystack = " ".join([name, positive_scope(item["description"])] + item["tags"] + item["outputs"]).casefold()
         matched = sorted(t for t in qtokens if contains(haystack, t))
+        matched_aliases = sorted(t for t in qaliases if contains(haystack, t))
         catmatch = sorted(qcats & set(item["categories"]))
         direct = contains(query, name.casefold())
-        if not (matched or catmatch or direct):
+        if not (matched or matched_aliases or catmatch or direct):
             excluded["no_task_match"] += 1
             continue
-        semantic = min(1.0, len(matched) / max(1, len(qtokens)))
-        category_fit = len(catmatch) / max(1, len(qcats))
-        base = 65 * semantic + 25 * category_fit + (60 if direct else 0)
-        if base < 5 and not args.category:
+        category_complete = bool(qcats) and qcats.issubset(set(item["categories"]))
+        strong_lexical = bool(matched_aliases) or (bool(matched) and (len(qtokens) == 1 or len(matched) >= 2))
+        if len(qcats) > 1 and not category_complete and not direct:
+            excluded["partial_category_coverage"] += 1
+            continue
+        broad = bool(getattr(args, "broad", False))
+        if direct or strong_lexical:
+            evidence_level = "high"
+        elif category_complete or (args.category and catmatch):
+            evidence_level = "medium"
+        elif broad:
+            evidence_level = "low"
+        else:
             excluded["weak_task_match"] += 1
             continue
+        semantic = min(1.0, (len(matched) + len(matched_aliases)) / max(1, len(qtokens) + len(qaliases)))
+        category_fit = len(catmatch) / max(1, len(qcats))
+        evidence_bonus = {"high": 30, "medium": 10, "low": 0}[evidence_level]
+        base = 65 * semantic + 25 * category_fit + (60 if direct else 0) + evidence_bonus
         personal = (7 if item["favorite"] else 0) + min(6, item["successes"] * 1.5)
         if item["ratings"]:
             personal += (sum(item["ratings"]) / len(item["ratings"]) - 3) * 2
@@ -384,12 +434,17 @@ def recommend(lib, args):
         score = base + max(-15, min(15, personal)) * min(1, base / 30)
         results.append({"id": sid, "name": name, "score": round(score, 2), "task_score": round(base, 2),
                         "description": item["description"], "categories": item["categories"],
-                        "matched_terms": matched, "matched_categories": catmatch,
+                        "matched_terms": matched, "matched_aliases": matched_aliases, "matched_categories": catmatch,
+                        "evidence_level": evidence_level,
+                        "match_reason": (["exact_name"] if direct else []) +
+                                        (["task_terms"] if strong_lexical else []) +
+                                        (["complete_category_coverage"] if category_complete else []),
                         "favorite": item["favorite"], "successes": item["successes"],
                         "entry": item.get("local_path") if installed(item) else item.get("evidence_url") or item.get("source_url"),
                         "installed": installed(item), "platform_status": pstatus,
                         "warnings": warnings, "content_hash": item.get("content_hash")})
-    results.sort(key=lambda s: (-s["score"], -int(s["installed"]), s["id"]))
+    evidence_rank = {"high": 0, "medium": 1, "low": 2}
+    results.sort(key=lambda s: (evidence_rank[s["evidence_level"]], -s["score"], -int(s["installed"]), s["id"]))
     unique, hashes = [], set()
     for item in results:
         digest = item.pop("content_hash")
@@ -398,9 +453,15 @@ def recommend(lib, args):
         if digest:
             hashes.add(digest)
         unique.append(item)
-    return {"query": args.query, "constraints": constraints, "total_matches": len(unique),
-            "results": unique[:args.limit], "excluded": dict(excluded),
-            "note": "Heuristic shortlist, not quality probabilities. Read actual skill exclusions before routing."}
+    broad = bool(getattr(args, "broad", False))
+    high = [item for item in unique if item["evidence_level"] == "high"]
+    qualified = unique if broad or not high else high
+    if high and not broad:
+        excluded["lower_evidence_than_best"] += len(unique) - len(high)
+    return {"query": args.query, "constraints": constraints, "total_matches": len(qualified),
+            "results": qualified[:args.limit], "excluded": dict(excluded),
+            "reference_only": True,
+            "note": "Reference shortlist only. Read the actual skill entry and verify task fit before routing or execution."}
 
 
 def compact_detail(item):
@@ -941,7 +1002,8 @@ def parser():
     rec.add_argument("--favorites-only", action="store_true")
     rec.add_argument("--installed-only", action="store_true")
     rec.add_argument("--exclude", action="append")
-    rec.add_argument("--limit", type=positive, default=5)
+    rec.add_argument("--limit", type=positive, default=3)
+    rec.add_argument("--broad", action="store_true", help="Include weak exploratory matches, clearly labeled low evidence")
     recruit_p = sub.add_parser("recruit", help="Add externally discovered skills to the candidate area")
     recruit_p.add_argument("file")
     recruit_p.add_argument("--need", required=True, help="User need or library gap that motivated discovery")

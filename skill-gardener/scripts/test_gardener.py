@@ -54,6 +54,49 @@ class GardenerTests(unittest.TestCase):
         results = self.run_cmd("recommend", "帮我找做PPT的skill")
         self.assertEqual([r["id"] for r in results["results"]], [expected["id"]])
 
+    def test_generic_task_words_do_not_create_recommendations(self):
+        self.add()
+        self.add("calendar", "Arrange meeting room calendars", categories=["productivity"])
+        result = self.run_cmd("recommend", "请帮我处理一下这个任务")
+        self.assertEqual(result["results"], [])
+        self.assertTrue(result["reference_only"])
+
+    def test_negative_scope_does_not_create_category_or_term_match(self):
+        entry = self.root / "negative" / "SKILL.md"
+        entry.parent.mkdir()
+        entry.write_text("---\nname: deck-only\ndescription: Create presentation slides. Do not use for PDF files.\n---\n", encoding="utf-8")
+        self.run_cmd("scan", "--root", str(self.root))
+        item = self.run_cmd("show", "deck-only")
+        self.assertNotIn("pdf", item["categories"])
+        self.assertEqual(self.run_cmd("recommend", "PDF") ["results"], [])
+
+    def test_multi_category_query_requires_complete_coverage(self):
+        self.add("caption-only", "Write 小红书 captions", categories=["writing"])
+        complete = self.add("xhs-carousel", "Create 小红书 copy and images", categories=["writing", "image"])
+        result = self.run_cmd("recommend", "制作小红书图片")
+        self.assertEqual([row["id"] for row in result["results"]], [complete["id"]])
+        self.assertEqual(result["results"][0]["evidence_level"], "high")
+
+    def test_default_recommendation_limit_is_three(self):
+        for index in range(5):
+            self.add(f"deck-{index}")
+        result = self.run_cmd("recommend", "演示文稿")
+        self.assertEqual(len(result["results"]), 3)
+
+    def test_high_evidence_prunes_generic_category_matches(self):
+        exact = self.add("mail-sender", "Send email and manage inbox", categories=["communication"])
+        self.add("team-chat", "Team chat and communication", categories=["communication"])
+        result = self.run_cmd("recommend", "发一封邮件")
+        self.assertEqual([row["id"] for row in result["results"]], [exact["id"]])
+        self.assertEqual(result["results"][0]["matched_aliases"], ["email", "mail"])
+
+    def test_specific_cross_language_alias_beats_broad_category(self):
+        exact = self.add("xhs", "Create a Xiaohongshu carousel", categories=["writing"])
+        self.add("blog", "Write blog articles", categories=["writing"])
+        result = self.run_cmd("recommend", "做一篇小红书图文")
+        self.assertEqual([row["id"] for row in result["results"]], [exact["id"]])
+        self.assertEqual(result["results"][0]["evidence_level"], "high")
+
     def test_recruitment_stays_in_candidate_area_until_promoted(self):
         path = self.root / "candidate.json"
         path.write_text(json.dumps({"name": "new-ppt", "description": "Create presentations",

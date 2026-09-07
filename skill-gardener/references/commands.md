@@ -26,6 +26,7 @@ P S ask "最新发布的 Skill 工具有哪些？" --limit 10
 P S recommend "制作一份中文产品汇报PPT" --category presentations --installed-only
 P S recommend "处理Excel" --platform Codex --strict-platform --cost free --offline yes
 P S recommend "制作封面" --tag illustration --exclude <id>
+P S recommend "探索可能相关的图片工具" --broad
 P S favorite <id> --reason "用户指定常用"
 P S favorite <id> --remove --reason "用户取消收藏"
 P S archive <id> --reason "用户指定出库"
@@ -47,6 +48,7 @@ P S export <新的导出文件.json>
 
 - 硬筛选默认：platform、cost、offline、difficulty、language。显式命令参数覆盖保存的值；platform=unknown 在普通推荐中会提示，只有 `--strict-platform` 才严格排除。
 - 软偏好：preferred_categories、preferred_tags、preferred_skills。
+- 推荐资格先看任务证据：名称直达、明确任务词或完整类别覆盖。软偏好只对已经合格的项排序；默认最多返回 3 项。`--broad` 仅用于用户明确要求扩大范围，低证据项仍只作探索参考。
 - 排除：excluded_skills，可用精确 id 或名称；同名来源不明确时用 id。
 - style 保存原文供宿主语义判断，不参与脚本硬筛选。
 - unused_days / review_days 控制养护阈值，默认 90 / 30。
